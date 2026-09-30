@@ -1,22 +1,52 @@
 import { computed, ref, watch } from 'vue'
 import { sampleDocument } from './sample'
+import { DEFAULT_TIMING, resolveDocumentTimeline } from './timing'
+import type { CueTiming } from './timing'
 import type { Cue, CueKind, FrozenVersion, PendingChange, Scene, StudioDocument, StudioState, WarningItem } from './types'
 
 const STORAGE_KEY = 'sologsb-1016-studio-v1'
+const DATA_VERSION = 2
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+
+function estimateCueDuration(document: StudioDocument, cue: Cue): number {
+  if (cue.manualDuration !== undefined) return cue.manualDuration
+  if (cue.kind === 'sfx') {
+    return document.soundEffects.find((effect) => effect.id === cue.soundEffectId)?.duration ?? 6
+  }
+  if (cue.kind === 'transition') return 3
+  const pauses = (cue.text.match(/[，。！？；、…]/g)?.length ?? 0) * 0.22
+  const effectiveRate = cue.rate || 1
+  return Number((cue.text.length / (4.2 * effectiveRate) + pauses).toFixed(1))
+}
+
+/**
+ * 旧数据升级：v1 没有挂点概念，所有提示隐式按列表顺序首尾相接。
+ * 升级时显式补成“顺接上一条”，之后统一走时间线引擎。
+ */
+function migrate(state: StudioState): StudioState {
+  if ((state.version ?? 1) >= DATA_VERSION) return state
+  for (const scene of state.document.scenes) {
+    for (const cue of scene.cues) {
+      if (!cue.timing) cue.timing = { ...DEFAULT_TIMING }
+    }
+  }
+  state.version = DATA_VERSION
+  return state
+}
 
 function loadState(): StudioState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw) as StudioState
+      const parsed = migrate(JSON.parse(raw) as StudioState)
       if (parsed.document?.scenes?.length) return parsed
     }
   } catch {
     // A corrupt local draft should not prevent access to the built-in example.
   }
   return {
+    version: DATA_VERSION,
     document: clone(sampleDocument),
     pending: [],
     frozen: [],
@@ -36,25 +66,54 @@ export function useStudio() {
   const selectedScene = computed(() => state.value.document.scenes.find((scene) => scene.id === selectedSceneId.value) ?? state.value.document.scenes[0])
 
   function durationOfCue(cue: Cue): number {
-    if (cue.manualDuration !== undefined) return cue.manualDuration
-    if (cue.kind === 'sfx') {
-      return state.value.document.soundEffects.find((effect) => effect.id === cue.soundEffectId)?.duration ?? 6
-    }
-    if (cue.kind === 'transition') return 3
-    const pauses = (cue.text.match(/[，。！？；、…]/g)?.length ?? 0) * 0.22
-    const effectiveRate = cue.rate || 1
-    return Number((cue.text.length / (4.2 * effectiveRate) + pauses).toFixed(1))
+    return estimateCueDuration(state.value.document, cue)
+  }
+
+  // 时间线是响应式的：任何上游时长、挂点、顺序改动都会立即重算所有下游起点，
+  // 固定秒点在引擎中作为无来源节点，天然挡住传播。
+  const timeline = computed(() => resolveDocumentTimeline(state.value.document, (cue) => estimateCueDuration(state.value.document, cue)))
+  const timelineErrors = computed(() => timeline.value.errors)
+  const blockingErrors = computed(() => timelineErrors.value)
+  const canExport = computed(() => blockingErrors.value.length === 0)
+
+  function timelineOfScene(sceneId: string) {
+    return timeline.value.scenes.find((item) => item.sceneId === sceneId)
   }
 
   function durationOfScene(scene: Scene): number {
+    const resolved = timeline.value.scenes.find((item) => item.sceneId === scene.id)
+    if (resolved) return resolved.duration
+    // 冻结快照等非当前文档：按纯顺序兜底估算。
     return Number(scene.cues.reduce((total, cue) => total + durationOfCue(cue), 0).toFixed(1))
   }
 
-  const totalDuration = computed(() => state.value.document.scenes.reduce((total, scene) => total + durationOfScene(scene), 0))
+  const totalDuration = computed(() => timeline.value.duration)
   const pendingChanges = computed(() => state.value.pending.filter((item) => item.status === 'pending'))
+
+  const blockingTitle: Record<string, string> = {
+    'dangling-target': '跟随目标缺失',
+    'timing-cycle': '挂点循环',
+    'crossed-fixed': '冲破固定秒点'
+  }
 
   const warnings = computed<WarningItem[]>(() => {
     const result: WarningItem[] = []
+
+    // 时间线阻断错误（拿掉依赖、形成循环、越过固定秒点）：停止导出并指出提示。
+    for (const error of timelineErrors.value) {
+      const scene = state.value.document.scenes.find((item) => item.id === error.sceneId)
+      result.push({
+        id: `timing-${error.code}-${error.cueId}`,
+        type: error.code,
+        level: 'error',
+        sceneId: error.sceneId,
+        cueId: error.cueId,
+        blocking: true,
+        title: `${scene?.code ?? ''} ${blockingTitle[error.code] ?? '时间线错误'}`,
+        detail: error.message
+      })
+    }
+
     for (const scene of state.value.document.scenes) {
       const actorRoles = new Map<string, string[]>()
       for (const cue of scene.cues) {
@@ -182,6 +241,17 @@ export function useStudio() {
     })
   }
 
+  function updateCueTiming(cueId: string, timing: CueTiming) {
+    commit('调整提示挂点', (document) => {
+      for (const scene of document.scenes) {
+        const cue = scene.cues.find((item) => item.id === cueId)
+        if (!cue) continue
+        cue.timing = clone(timing)
+        break
+      }
+    })
+  }
+
   function addScene() {
     const nextNumber = state.value.document.scenes.length + 1
     const id = uid('scene')
@@ -223,7 +293,8 @@ export function useStudio() {
         rate: 1,
         soundEffectId: kind === 'sfx' ? document.soundEffects[0]?.id : undefined,
         transition: kind === 'transition' ? '淡出' : '',
-        manualDuration: kind === 'transition' ? 3 : undefined
+        manualDuration: kind === 'transition' ? 3 : undefined,
+        timing: { ...DEFAULT_TIMING }
       })
     })
     selectedCueId.value = id
@@ -298,7 +369,9 @@ export function useStudio() {
     replaceDocument(next, '重做修改')
   }
 
-  function freeze(name: string): FrozenVersion {
+  function freeze(name: string): { version: FrozenVersion | null; blocked: WarningItem[] } {
+    // 存在缺依赖、循环或越过固定点的提示时，停止导出并指出对应提示。
+    if (blockingErrors.value.length) return { version: null, blocked: warnings.value.filter((item) => item.blocking) }
     const version: FrozenVersion = {
       id: uid('version'),
       name: name.trim() || `制作稿 v${state.value.frozen.length + 1}`,
@@ -308,25 +381,36 @@ export function useStudio() {
     }
     state.value.frozen.unshift(version)
     persist()
-    return version
+    return { version, blocked: [] }
   }
 
-  function makeScript(document: StudioDocument): string {
+  function formatGeneratedAt(iso: string): string {
+    const date = new Date(iso)
+    return `${date.toLocaleString('zh-CN', { hour12: false })}（${iso}）`
+  }
+
+  function makeScript(document: StudioDocument, generatedAt = new Date().toISOString()): string {
+    const documentTimeline = resolveDocumentTimeline(document, (cue) => estimateCueDuration(document, cue))
     const lines = [
       document.title,
       document.subtitle,
-      `目标时长：${document.targetDuration} 秒`,
+      `目标时长：${document.targetDuration} 秒｜预计总时长：${documentTimeline.duration.toFixed(1)} 秒`,
+      `生成时间：${formatGeneratedAt(generatedAt)}`,
       '='.repeat(48),
       ''
     ]
     document.scenes.forEach((scene, sceneIndex) => {
+      const resolved = documentTimeline.scenes[sceneIndex]
       lines.push(`${scene.code}｜${scene.title}`)
       lines.push(`场景：${scene.location} / ${scene.timeOfDay}`)
       lines.push(`转场：${scene.transition}`)
-      lines.push(`场次限额：${scene.durationLimit} 秒｜预计：${durationOfScene(scene)} 秒`)
+      lines.push(`场次限额：${scene.durationLimit} 秒｜预计：${resolved.duration.toFixed(1)} 秒`)
       lines.push('-'.repeat(34))
       scene.cues.forEach((cue, cueIndex) => {
-        const prefix = `${String(cueIndex + 1).padStart(2, '0')} [${durationOfCue(cue).toFixed(1)}s]`
+        const timed = resolved.cues[cueIndex]
+        const timing = cue.timing ?? DEFAULT_TIMING
+        const pin = timing.mode === 'absolute' ? '｜固定' : timed.pinned ? '｜固定' : ''
+        const prefix = `${String(cueIndex + 1).padStart(2, '0')} [${timed.start.toFixed(1)}-${timed.end.toFixed(1)}s / ${timed.duration.toFixed(1)}s${pin}]`
         if (cue.kind === 'dialogue') {
           const role = document.characters.find((character) => character.id === cue.characterId)?.name ?? '未指定角色'
           lines.push(`${prefix} ${role}｜${cue.emotion || '自然'}｜语速 ${cue.rate}`)
@@ -338,14 +422,23 @@ export function useStudio() {
         } else {
           lines.push(`${prefix} 转场｜${cue.transition}｜${cue.text}`)
         }
+        if (timing.mode === 'follow' && timing.targetId) {
+          const targetIndex = scene.cues.findIndex((item) => item.id === timing.targetId)
+          const anchorLabel = timing.anchor === 'start' ? '起点' : '终点'
+          lines.push(`    挂点：跟随 #${targetIndex + 1}${anchorLabel}${timing.offset ? ` ${timing.offset > 0 ? '+' : ''}${timing.offset}s` : ''}`)
+        } else if (timing.mode === 'after') {
+          lines.push('    挂点：顺接上一条')
+        }
       })
       if (sceneIndex < document.scenes.length - 1) lines.push('')
     })
+    lines.push('='.repeat(48))
+    lines.push(`制作稿生成时间：${formatGeneratedAt(generatedAt)}（冻结稿，不可修改）`)
     return lines.join('\n')
   }
 
   function downloadVersion(version: FrozenVersion) {
-    const blob = new Blob([makeScript(version.document)], { type: 'text/plain;charset=utf-8' })
+    const blob = new Blob([makeScript(version.document, version.createdAt)], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
@@ -373,11 +466,17 @@ export function useStudio() {
     pendingChanges,
     warnings,
     saveState,
+    timeline,
+    timelineErrors,
+    blockingErrors,
+    canExport,
+    timelineOfScene,
     durationOfCue,
     durationOfScene,
     updateProject,
     updateScene,
     updateCue,
+    updateCueTiming,
     addScene,
     deleteScene,
     addCue,

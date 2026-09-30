@@ -19,22 +19,25 @@ export const sampleDocument: StudioDocument = {
     {
       id: 'scene-1', code: 'S01', title: '雨夜来客', location: '旧港公寓 302', timeOfDay: '深夜', transition: '冷开场 · 雨声渐入', durationLimit: 150,
       cues: [
-        { id: 'cue-1-1', kind: 'sfx', text: '雨点落在铁皮窗檐上', emotion: '', rate: 1, soundEffectId: 'fx-rain', transition: '', manualDuration: 8 },
-        { id: 'cue-1-2', kind: 'dialogue', characterId: 'char-lin', text: '顾闻？你怎么会在这个时间回来。', emotion: '警觉 / 压低音量', rate: 0.9, transition: '' },
-        { id: 'cue-1-3', kind: 'dialogue', characterId: 'char-gu', text: '船晚点了。楼下有人说，这几天一直有人在找你。', emotion: '疲惫 / 克制', rate: 0.95 as 1, transition: '' },
-        { id: 'cue-1-4', kind: 'sfx', text: '远处电话铃穿过走廊', emotion: '', rate: 1, soundEffectId: 'fx-bell', transition: '', manualDuration: 3.5 },
-        { id: 'cue-1-5', kind: 'dialogue', characterId: 'char-landlord', text: '小林，电话！对方不肯留名字。', emotion: '急促 / 隔门', rate: 1.1, transition: '' },
-        { id: 'cue-1-6', kind: 'transition', text: '电话声切黑', emotion: '', rate: 1, transition: '十字淡出', manualDuration: 4 }
+        { id: 'cue-1-1', kind: 'sfx', text: '雨点落在铁皮窗檐上', emotion: '', rate: 1, soundEffectId: 'fx-rain', transition: '', manualDuration: 8, timing: { mode: 'after' } },
+        { id: 'cue-1-2', kind: 'dialogue', characterId: 'char-lin', text: '顾闻？你怎么会在这个时间回来。', emotion: '警觉 / 压低音量', rate: 0.9, transition: '', timing: { mode: 'after' } },
+        { id: 'cue-1-3', kind: 'dialogue', characterId: 'char-gu', text: '船晚点了。楼下有人说，这几天一直有人在找你。', emotion: '疲惫 / 克制', rate: 0.95 as 1, transition: '', timing: { mode: 'after' } },
+        // 电话铃不按列表顺序：与顾闻这句台词同时响起（跟随其起点）。
+        { id: 'cue-1-4', kind: 'sfx', text: '远处电话铃穿过走廊', emotion: '', rate: 1, soundEffectId: 'fx-bell', transition: '', manualDuration: 3.5, timing: { mode: 'follow', targetId: 'cue-1-3', anchor: 'start', offset: 0 } },
+        { id: 'cue-1-5', kind: 'dialogue', characterId: 'char-landlord', text: '小林，电话！对方不肯留名字。', emotion: '急促 / 隔门', rate: 1.1, transition: '', timing: { mode: 'after' } },
+        // 固定在本场第 30 秒切黑；上游时长变化不会推动它，也不再向后传播。
+        { id: 'cue-1-6', kind: 'transition', text: '电话声切黑', emotion: '', rate: 1, transition: '十字淡出', manualDuration: 4, timing: { mode: 'absolute', at: 30 } }
       ]
     },
     {
       id: 'scene-2', code: 'S02', title: '未接来电', location: '电话亭与码头', timeOfDay: '凌晨', transition: '平行剪辑 · 交叉叠化', durationLimit: 125,
       cues: [
-        { id: 'cue-2-1', kind: 'sfx', text: '码头潮水与脚步靠近', emotion: '', rate: 1, soundEffectId: 'fx-steps', transition: '', manualDuration: 6 },
-        { id: 'cue-2-2', kind: 'dialogue', characterId: 'char-gu', text: '别回头。把信放在第三个电话亭里。', emotion: '冷峻 / 电话滤波', rate: 0.9, transition: '' },
-        { id: 'cue-2-3', kind: 'dialogue', characterId: 'char-lin', text: '那封没有署名的信，是你寄的？', emotion: '震动 / 强作镇定', rate: 0.9, transition: '' },
-        { id: 'cue-2-4', kind: 'sfx', text: '雨幕中未登记的环境声', emotion: '', rate: 1, soundEffectId: 'fx-missing-siren', transition: '', manualDuration: 7 },
-        { id: 'cue-2-5', kind: 'transition', text: '警报从远处掠过', emotion: '', rate: 1, transition: '声音先入 · 2 秒后画面切黑', manualDuration: 2 }
+        { id: 'cue-2-1', kind: 'sfx', text: '码头潮水与脚步靠近', emotion: '', rate: 1, soundEffectId: 'fx-steps', transition: '', manualDuration: 6, timing: { mode: 'after' } },
+        { id: 'cue-2-2', kind: 'dialogue', characterId: 'char-gu', text: '别回头。把信放在第三个电话亭里。', emotion: '冷峻 / 电话滤波', rate: 0.9, transition: '', timing: { mode: 'after' } },
+        // 林夏在顾闻这句结束 2 秒后才接话，体现“等提示结束再等几秒”。
+        { id: 'cue-2-3', kind: 'dialogue', characterId: 'char-lin', text: '那封没有署名的信，是你寄的？', emotion: '震动 / 强作镇定', rate: 0.9, transition: '', timing: { mode: 'follow', targetId: 'cue-2-2', anchor: 'end', offset: 2 } },
+        { id: 'cue-2-4', kind: 'sfx', text: '雨幕中未登记的环境声', emotion: '', rate: 1, soundEffectId: 'fx-missing-siren', transition: '', manualDuration: 7, timing: { mode: 'after' } },
+        { id: 'cue-2-5', kind: 'transition', text: '警报从远处掠过', emotion: '', rate: 1, transition: '声音先入 · 2 秒后画面切黑', manualDuration: 2, timing: { mode: 'after' } }
       ]
     },
     {

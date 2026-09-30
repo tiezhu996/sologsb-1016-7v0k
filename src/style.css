@@ -74,13 +74,25 @@ h3 { margin: 3px 0 0; font-size: 21px; }
 .cue-topline { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
 .cue-number { color: #66738a; font: 700 11px monospace; }
 .kind-select { width: 92px; }
-.duration-pill { margin-left: auto; padding: 3px 8px; color: #8492a9; border-radius: 99px; background: #0e1420; font: 700 11px monospace; }
+.duration-pill { padding: 3px 8px; color: #8492a9; border-radius: 99px; background: #0e1420; font: 700 11px monospace; }
+.timecode-pill { margin-left: auto; padding: 3px 9px; color: #9fb2cc; border: 1px solid #2c3850; border-radius: 99px; font: 700 11px monospace; white-space: nowrap; }
+.timecode-pill.pinned { color: #ffd08a; border-color: #7a5a2c; background: #241c10; }
+.cue-card.blocking { border-color: #ff6b7e; box-shadow: 0 0 0 1px rgba(255,107,126,.35); }
+.cue-timing-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 11px; padding: 8px 10px; border: 1px dashed #2c3850; border-radius: 8px; background: #0f1520; }
+.timing-mode-select { width: 138px; }
+.timing-target-select { min-width: 200px; flex: 1 1 200px; }
+.timing-anchor-select { width: 118px; }
+.timing-hint { color: #6e7c93; font-size: 11px; }
+.invalid-select :deep(.n-base-selection) { border-color: #ff6b7e !important; }
 .cue-grid { display: grid; grid-template-columns: repeat(4, minmax(100px, 1fr)); gap: 8px; }
 .review-column :deep(.n-tabs-nav) { margin-bottom: 12px; }
 .review-list { display: grid; gap: 10px; max-height: calc(100vh - 260px); overflow-y: auto; padding: 2px 2px 30px; }
 .warning-card, .pending-card, .version-card { padding: 13px; border: 1px solid #293346; border-radius: 10px; background: #141b28; }
 .warning-card.error { border-left: 3px solid #ff6b7e; }
 .warning-card.warning { border-left: 3px solid #ffc777; }
+.warning-card.blocking { background: #1f1620; border-color: #5a2c37; }
+.export-stop-alert { margin-bottom: 10px; }
+.blocker-line { margin-top: 4px; font-size: 12px; line-height: 1.5; }
 .warning-title { display: flex; align-items: center; gap: 8px; }
 .warning-title strong { font-size: 13px; }
 .warning-card p, .pending-card p { margin: 9px 0; color: #8996aa; font-size: 12px; line-height: 1.55; }
