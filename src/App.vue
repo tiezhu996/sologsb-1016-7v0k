@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   NAlert,
   NButton,
@@ -17,22 +17,30 @@ import {
   NTag
 } from 'naive-ui'
 import { useStudio } from './useStudio'
-import type { Cue, CueKind, Rate } from './types'
+import { cueLabel } from './scheduler'
+import type { Cue, CueAnchor, CueKind, Rate } from './types'
 
 const studio = useStudio()
 const {
   state,
   selectedSceneId,
+  selectedCueId,
   selectedScene,
+  schedule,
+  exportBlocked,
   totalDuration,
   pendingChanges,
   warnings,
   saveState,
   durationOfCue,
   durationOfScene,
+  cueTiming,
+  cueIssues,
+  anchorDescription,
   updateProject,
   updateScene,
   updateCue,
+  updateAnchor,
   addScene,
   deleteScene,
   addCue,
@@ -58,6 +66,15 @@ const kindOptions = [
   { label: '台词', value: 'dialogue' },
   { label: '音效', value: 'sfx' },
   { label: '转场', value: 'transition' }
+]
+const anchorModeOptions = [
+  { label: '接上一条（顺序挂点）', value: 'prev' },
+  { label: '跟随指定提示', value: 'follow' },
+  { label: '固定绝对秒点', value: 'absolute' }
+]
+const followFromOptions = [
+  { label: '同时起（目标开始）', value: 'start' },
+  { label: '等目标结束', value: 'end' }
 ]
 const rateOptions: Array<{ label: string; value: Rate }> = [
   { label: '慢 0.8×', value: 0.8 },
@@ -91,10 +108,42 @@ const pendingCount = computed(() => pendingChanges.value.length)
 const warningCount = computed(() => warnings.value.length)
 const saveLabel = computed(() => saveState.value === 'saved' ? '已保存到本机' : '正在保存…')
 
-function cueName(cue: Cue) {
-  if (cue.kind === 'dialogue') return state.value.document.characters.find((item) => item.id === cue.characterId)?.name ?? '未指定角色'
-  if (cue.kind === 'sfx') return state.value.document.soundEffects.find((item) => item.id === cue.soundEffectId)?.name ?? '缺失音效'
-  return '转场'
+const blockReports = computed(() =>
+  schedule.value.issues.map((issue) => {
+    const scene = state.value.document.scenes.find((item) => item.id === issue.sceneId)
+    const cue = scene?.cues.find((item) => item.id === issue.cueId)
+    const typeText = issue.type === 'dangling' ? '依赖脱落' : issue.type === 'cycle' ? '挂点循环' : '越过固定秒点'
+    let detail = ''
+    if (scene && cue) {
+      if (issue.type === 'dangling') detail = `跟随的提示 ${issue.relatedIds[0]} 已不存在`
+      else if (issue.type === 'cycle') detail = '与其他提示互相跟随，时间无法求解'
+      else detail = `重算到 ${(issue.at ?? 0).toFixed(1)}s，越过固定 ${(issue.fixedTime ?? 0).toFixed(1)}s 秒点`
+    }
+    return { issue, scene, cue, typeText, detail }
+  })
+)
+
+function nameOfCue(cue: Cue) {
+  return cueLabel(cue, state.value.document)
+}
+
+function followTargetOptions(sceneCues: Cue[], selfId: string) {
+  return sceneCues
+    .map((cue, index) => ({ cue, index }))
+    .filter(({ cue }) => cue.id !== selfId)
+    .map(({ cue, index }) => ({ label: `#${index + 1} ${nameOfCue(cue)}（${durationOfCue(cue).toFixed(1)}s）`, value: cue.id }))
+}
+
+function changeAnchorMode(cue: Cue, mode: CueAnchor['mode']) {
+  if (cue.anchor?.mode === mode) return
+  if (mode === 'prev') updateAnchor(cue.id, { mode: 'prev', offset: cue.anchor?.mode === 'follow' ? cue.anchor.offset : 0 })
+  else if (mode === 'absolute') updateAnchor(cue.id, { mode: 'absolute', time: 0 })
+  else updateAnchor(cue.id, { mode: 'follow', targetId: '', from: 'end', offset: 0 })
+}
+
+function patchFollow(cue: Cue, patch: Partial<Extract<CueAnchor, { mode: 'follow' }>>) {
+  const current = cue.anchor?.mode === 'follow' ? cue.anchor : { mode: 'follow' as const, targetId: '', from: 'end' as const, offset: 0 }
+  updateAnchor(cue.id, { ...current, ...patch })
 }
 
 function sceneStatus(sceneId: string) {
@@ -107,9 +156,17 @@ function dropCue(targetId: string) {
   dragCueId.value = ''
 }
 
-function goToScene(sceneId: string) {
+async function locate(sceneId?: string, cueId?: string) {
+  if (!sceneId) return
   selectedSceneId.value = sceneId
-  document.querySelector('.editor-column')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  activeRightTab.value = 'warnings'
+  await nextTick()
+  if (cueId) {
+    selectedCueId.value = cueId
+    document.querySelector(`[data-cue-id="${cueId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  } else {
+    document.querySelector('.editor-column')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 }
 
 function changeCueKind(cue: Cue, kind: CueKind) {
@@ -120,12 +177,17 @@ function changeCueKind(cue: Cue, kind: CueKind) {
 }
 
 function openFreeze() {
+  if (exportBlocked.value) {
+    showFreezeModal.value = true
+    return
+  }
   freezeName.value = `制作稿 v${state.value.frozen.length + 1}`
   showFreezeModal.value = true
 }
 
 function confirmFreeze() {
   const version = freeze(freezeName.value)
+  if (!version) return
   showFreezeModal.value = false
   downloadVersion(version)
 }
@@ -178,13 +240,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <span class="save-state">{{ saveLabel }}</span>
           <n-button quaternary @click="undo">撤销 ⌘Z</n-button>
           <n-button quaternary @click="redo">重做 ⇧⌘Z</n-button>
-          <n-button type="primary" @click="openFreeze">冻结并导出</n-button>
+          <n-button :type="exportBlocked ? 'warning' : 'primary'" @click="openFreeze">
+            {{ exportBlocked ? `排程阻断 · ${schedule.issues.length}` : '冻结并导出' }}
+          </n-button>
         </div>
       </header>
 
       <section class="summary-strip">
         <div class="metric">
-          <span>预计总时长</span>
+          <span>重算总时长</span>
           <strong>{{ projectMinutes }}</strong>
           <small>{{ totalDuration.toFixed(1) }} / {{ state.document.targetDuration }} 秒</small>
         </div>
@@ -243,10 +307,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             </button>
           </div>
           <div class="sidebar-tip">
-            <strong>键盘工作流</strong>
-            <span>[ / ] 切换场次</span>
-            <span>Alt + ↑ / ↓ 调整顺序</span>
-            <span>⌘S 立即保存 · ⌘Z 撤销</span>
+            <strong>挂点工作流</strong>
+            <span>顺序挂点：接上一条</span>
+            <span>跟随：与指定提示同时起或结束后等几秒</span>
+            <span>固定秒点：挡住上游传播</span>
+            <span>⌘S 保存 · ⌘Z 撤销</span>
           </div>
           <n-button block quaternary @click="resetSample">恢复示例数据</n-button>
         </aside>
@@ -275,7 +340,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <div class="timeline-heading">
             <div>
               <span class="eyebrow">TIMELINE</span>
-              <h3>台词与声音提示</h3>
+              <h3>台词与声音提示 · 场次重算 {{ durationOfScene(selectedScene).toFixed(1) }} 秒</h3>
             </div>
             <div class="add-actions">
               <n-button size="small" type="primary" secondary @click="addCue('dialogue')">＋ 台词</n-button>
@@ -287,9 +352,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <div class="cue-list">
             <article
               v-for="(cue, index) in selectedScene.cues"
+              :id="`cue-${cue.id}`"
+              :data-cue-id="cue.id"
               :key="cue.id"
               class="cue-card"
-              :class="[`kind-${cue.kind}`, { dragging: dragCueId === cue.id }]"
+              :class="[`kind-${cue.kind}`, { dragging: dragCueId === cue.id, blocked: cueIssues(cue.id).length > 0, selected: selectedCueId === cue.id }]"
               draggable="true"
               @dragstart="dragCueId = cue.id"
               @dragend="dragCueId = ''"
@@ -301,8 +368,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 <div class="cue-topline">
                   <span class="cue-number">{{ String(index + 1).padStart(2, '0') }}</span>
                   <n-select class="kind-select" size="small" :value="cue.kind" :options="kindOptions" @update:value="changeCueKind(cue, $event)" />
-                  <n-tag size="small" :bordered="false">{{ cueName(cue) }}</n-tag>
+                  <n-tag size="small" :bordered="false">{{ nameOfCue(cue) }}</n-tag>
                   <span class="duration-pill">{{ durationOfCue(cue).toFixed(1) }}s</span>
+                  <span class="timing-pill" :class="{ unresolved: !cueTiming(selectedScene.id, cue.id)?.resolved }">
+                    {{ cueTiming(selectedScene.id, cue.id)?.resolved ? `@${cueTiming(selectedScene.id, cue.id)?.start.toFixed(1)}s → ${cueTiming(selectedScene.id, cue.id)?.end.toFixed(1)}s` : '时间未求解' }}
+                  </span>
                   <n-button size="tiny" tertiary type="error" @click="deleteCue(cue.id)">删除</n-button>
                 </div>
 
@@ -331,6 +401,62 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                     <template #suffix>秒</template>
                   </n-input-number>
                 </div>
+
+                <div class="anchor-row">
+                  <span class="anchor-label">起播挂点</span>
+                  <n-select
+                    class="anchor-mode"
+                    size="small"
+                    :value="cue.anchor?.mode ?? 'prev'"
+                    :options="anchorModeOptions"
+                    @update:value="changeAnchorMode(cue, $event)"
+                  />
+                  <template v-if="cue.anchor?.mode === 'prev'">
+                    <n-input-number size="small" :value="cue.anchor.offset" :step="0.5" :min="0" @update:value="updateAnchor(cue.id, { mode: 'prev', offset: $event ?? 0 })">
+                      <template #suffix>结束后等待秒</template>
+                    </n-input-number>
+                    <span class="anchor-hint">0 = 紧接上一条；首条锚定场次零点</span>
+                  </template>
+                  <template v-else-if="cue.anchor?.mode === 'follow'">
+                    <n-select
+                      class="anchor-target"
+                      size="small"
+                      filterable
+                      :value="cue.anchor.targetId || null"
+                      :options="followTargetOptions(selectedScene.cues, cue.id)"
+                      placeholder="选择跟随的提示"
+                      @update:value="patchFollow(cue, { targetId: $event })"
+                    />
+                    <n-select
+                      class="anchor-from"
+                      size="small"
+                      :value="cue.anchor.from"
+                      :options="followFromOptions"
+                      @update:value="patchFollow(cue, { from: $event })"
+                    />
+                    <n-input-number size="small" :value="cue.anchor.offset" :step="0.5" @update:value="patchFollow(cue, { offset: $event ?? 0 })">
+                      <template #suffix>偏移秒</template>
+                    </n-input-number>
+                  </template>
+                  <template v-else-if="cue.anchor?.mode === 'absolute'">
+                    <n-input-number size="small" :value="cue.anchor.time" :min="0" :step="0.5" @update:value="updateAnchor(cue.id, { mode: 'absolute', time: Math.max(0, $event ?? 0) })">
+                      <template #suffix>场次内绝对秒</template>
+                    </n-input-number>
+                    <span class="anchor-hint">固定秒点不随上游移动，并挡住顺序链重算</span>
+                  </template>
+                  <span class="anchor-summary">{{ anchorDescription(cue, selectedScene) }}</span>
+                </div>
+
+                <div v-for="issue in cueIssues(cue.id)" :key="`${issue.type}-${issue.cueId}`" class="cue-issue">
+                  <n-tag size="small" type="error" :bordered="false">
+                    {{ issue.type === 'dangling' ? '依赖脱落' : issue.type === 'cycle' ? '挂点循环' : '越过固定秒点' }}
+                  </n-tag>
+                  <span v-if="issue.type === 'cross-fixed'">
+                    重算 {{ (issue.at ?? 0).toFixed(1) }}s 越过固定 {{ (issue.fixedTime ?? 0).toFixed(1) }}s，已挡住传播
+                  </span>
+                  <span v-else-if="issue.type === 'dangling'">跟随目标 {{ issue.relatedIds[0] }} 已不存在</span>
+                  <span v-else>挂点互相跟随形成循环</span>
+                </div>
               </div>
             </article>
             <n-empty v-if="!selectedScene.cues.length" description="这场还没有声音提示">
@@ -352,11 +478,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               <div class="review-list">
                 <div v-for="warning in warnings" :key="warning.id" class="warning-card" :class="warning.level">
                   <div class="warning-title">
-                    <n-tag size="small" :type="warning.level === 'error' ? 'error' : 'warning'" :bordered="false">{{ warning.type === 'collision' ? '撞场' : warning.type === 'missing-sfx' ? '引用' : '时长' }}</n-tag>
+                    <n-tag size="small" :type="warning.level === 'error' ? 'error' : 'warning'" :bordered="false">
+                      {{ warning.type === 'collision' ? '撞场' : warning.type === 'missing-sfx' ? '引用' : warning.type === 'schedule' ? '排程' : '时长' }}
+                    </n-tag>
                     <strong>{{ warning.title }}</strong>
                   </div>
                   <p>{{ warning.detail }}</p>
-                  <n-button size="tiny" quaternary @click="goToScene(warning.sceneId)">定位到 {{ state.document.scenes.find((scene) => scene.id === warning.sceneId)?.code }}</n-button>
+                  <n-button size="tiny" quaternary @click="locate(warning.sceneId, warning.cueId)">
+                    定位到 {{ state.document.scenes.find((scene) => scene.id === warning.sceneId)?.code }}
+                  </n-button>
                 </div>
                 <n-empty v-if="!warnings.length" description="当前没有连续性问题" />
               </div>
@@ -387,12 +517,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 <div v-for="version in state.frozen" :key="version.id" class="version-card">
                   <div>
                     <strong>{{ version.name }}</strong>
-                    <span>{{ new Date(version.createdAt).toLocaleString('zh-CN') }}</span>
-                    <small>{{ version.document.scenes.length }} 场 · {{ version.totalDuration.toFixed(1) }} 秒</small>
+                    <span>生成时间 {{ new Date(version.createdAt).toLocaleString('zh-CN') }}</span>
+                    <small>冻结制作稿 · {{ version.document.scenes.length }} 场 · {{ version.totalDuration.toFixed(1) }} 秒</small>
                   </div>
                   <n-button size="small" type="primary" secondary @click="downloadVersion(version)">导出稿</n-button>
                 </div>
-                <n-empty v-if="!state.frozen.length" description="冻结后生成只读制作稿" />
+                <n-empty v-if="!state.frozen.length" description="冻结后生成只读制作稿（含生成时间）" />
               </div>
             </n-tab-pane>
           </n-tabs>
@@ -402,14 +532,36 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
     <n-modal v-model:show="showFreezeModal">
       <div class="dialog-card">
-        <span class="eyebrow">FREEZE VERSION</span>
-        <h2>冻结当前版本</h2>
-        <p>冻结会保存一份不可变快照，并立即下载纯文本制作稿。当前草稿仍可继续编辑。</p>
-        <n-input v-model:value="freezeName" placeholder="版本名称" @keyup.enter="confirmFreeze" />
-        <div class="dialog-actions">
-          <n-button @click="showFreezeModal = false">取消</n-button>
-          <n-button type="primary" @click="confirmFreeze">冻结并导出</n-button>
-        </div>
+        <template v-if="exportBlocked">
+          <span class="eyebrow">EXPORT BLOCKED</span>
+          <h2>排程未通过，已停止导出</h2>
+          <n-alert type="error" :show-icon="false">
+            存在依赖脱落、挂点循环或重算越过固定秒点的提示。请先处理下列提示，再冻结制作稿。
+          </n-alert>
+          <div class="block-list">
+            <div v-for="(report, i) in blockReports" :key="`${report.issue.type}-${report.issue.cueId}-${i}`" class="block-item">
+              <n-tag size="small" type="error" :bordered="false">{{ report.typeText }}</n-tag>
+              <div class="block-copy">
+                <strong>{{ report.scene?.code }} · {{ report.cue ? nameOfCue(report.cue) : '未知提示' }}</strong>
+                <span>{{ report.detail }}</span>
+              </div>
+              <n-button size="tiny" quaternary @click="locate(report.scene?.id, report.issue.cueId); showFreezeModal = false">定位</n-button>
+            </div>
+          </div>
+          <div class="dialog-actions">
+            <n-button @click="showFreezeModal = false">知道了</n-button>
+          </div>
+        </template>
+        <template v-else>
+          <span class="eyebrow">FREEZE VERSION</span>
+          <h2>冻结当前版本</h2>
+          <p>冻结会保存一份不可变快照并写出生成时间，随后下载纯文本制作稿。当前草稿仍可继续编辑。</p>
+          <n-input v-model:value="freezeName" placeholder="版本名称" @keyup.enter="confirmFreeze" />
+          <div class="dialog-actions">
+            <n-button @click="showFreezeModal = false">取消</n-button>
+            <n-button type="primary" @click="confirmFreeze">冻结并导出</n-button>
+          </div>
+        </template>
       </div>
     </n-modal>
   </n-config-provider>
